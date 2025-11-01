@@ -1,0 +1,165 @@
+name: UBUNTU-WAYDROID-RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  waydroid-rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
+
+      - name: Update System & Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt upgrade -y
+          sudo apt install -y ubuntu-desktop xrdp netcat-openbsd curl wget gnupg lsb-release software-properties-common
+
+      - name: Install Waydroid Dependencies
+        run: |
+          # Add Waydroid repo
+          sudo add-apt-repository ppa:waydroid/waydroid
+          sudo apt update
+
+          # Install kernel modules and Waydroid
+          sudo apt install -y waydroid linux-modules-extra-$(uname -r)
+
+          # Enable required kernel modules
+          sudo modprobe binder_linux
+          sudo modprobe ashmem_linux
+
+          # Ensure modules persist
+          echo "binder_linux" | sudo tee -a /etc/modules-load.d/waydroid.conf
+          echo "ashmem_linux" | sudo tee -a /etc/modules-load.d/waydroid.conf
+
+      - name: Configure XRDP
+        run: |
+          sudo adduser xrdp ssl-cert
+          sudo systemctl restart xrdp
+          sudo systemctl enable xrdp
+          sudo ufw allow 3389/tcp || true
+          sudo ufw --force enable || true
+
+      - name: Create RDP User with Secure Password
+        run: |
+          # Generate strong random password
+          chars_upper=$(cat /dev/urandom | tr -dc 'A-Z' | head -c4)
+          chars_lower=$(cat /dev/urandom | tr -dc 'a-z' | head -c4)
+          chars_num=$(cat /dev/urandom | tr -dc '0-9' | head -c4)
+          chars_spec=$(cat /dev/urandom | tr -dc '!@#$%^&*()_+-=' | head -c4)
+          password=$(echo "$chars_upper$chars_lower$chars_num$chars_spec" | fold -w1 | shuf | tr -d '\n')
+          
+          username="tahir"
+          
+          sudo adduser --disabled-password --gecos "" $username
+          echo "$username:$password" | sudo chpasswd
+          sudo usermod -aG sudo $username
+          
+          # Set GNOME session
+          sudo mkdir -p /home/$username
+          sudo -u $username bash -c 'echo "gnome-session" > ~/.xsession'
+          
+          echo "RDP_USER=$username" >> $GITHUB_ENV
+          echo "RDP_PASS=$password" >> $GITHUB_ENV
+
+      - name: Initialize Waydroid
+        run: |
+          sudo waydroid init -f
+          sudo systemctl restart waydroid-container
+          sleep 10
+          
+          # Start session (non-blocking)
+          sudo waydroid session start &
+          
+          # Wait for container to be ready
+          echo "Waiting for Waydroid container to start..."
+          timeout=60
+          while [ $timeout -gt 0 ]; do
+              if waydroid status | grep -q "RUNNING"; then
+                  echo "Waydroid is RUNNING!"
+                  break
+              fi
+              sleep 5
+              timeout=$((timeout - 5))
+          done
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Connect via Tailscale
+        run: |
+          hostname="waydroid-$GITHUB_RUN_ID"
+          up_output=$(sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$hostname --accept-routes --accept-dns=false 2>&1)
+          echo "Tailscale up: $up_output"
+
+          # Wait for IP
+          tsIP=""
+          retries=0
+          while [ -z "$tsIP" ] && [ $retries -lt 30 ]; do
+              tsIP=$(sudo tailscale ip --4)
+              [ -n "$tsIP" ] && break
+              echo "Waiting for Tailscale IP... ($retries)"
+              sleep 5
+              retries=$((retries + 1))
+          done
+
+          if [ -z "$tsIP" ]; then
+              echo "Failed to get Tailscale IP"
+              sudo tailscale status
+              exit 1
+          fi
+
+          echo "TAILSCALE_IP=$tsIP" >> $GITHUB_ENV
+          echo "TAILSCALE_HOST=$hostname" >> $GITHUB_ENV
+
+      - name: Verify RDP & Waydroid
+        run: |
+          echo "=== CONNECTION INFO ==="
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "Username: $RDP_USER"
+          echo "Password: $RDP_PASS"
+          echo "Waydroid Status:"
+          waydroid status || echo "Waydroid not fully ready yet"
+
+          # Test RDP port
+          if ! nc -zv localhost 3389; then
+              echo "RDP port 3389 not open locally"
+              exit 1
+          fi
+          if ! nc -zv $TAILSCALE_IP 3389; then
+              echo "RDP not reachable over Tailscale"
+              exit 1
+          fi
+          echo "RDP is accessible!"
+
+      - name: Start Waydroid Full UI (Optional)
+        run: |
+          # Launch Waydroid UI in background (will appear in GNOME)
+          sudo -u $RDP_USER DISPLAY=:10 waydroid show-full-ui &
+
+      - name: Keep Alive & Show Instructions
+        run: |
+          echo "=================================================="
+          echo "           WAYDROID + RDP READY"
+          echo "=================================================="
+          echo "1. Install Tailscale on your Windows PC: https://tailscale.com/download"
+          echo "2. Login to the same Tailscale network (using your auth key)"
+          echo "3. Open Windows RDP App (mstsc.exe)"
+          echo "4. Connect to: $TAILSCALE_IP"
+          echo "   Username: $RDP_USER"
+          echo "   Password: $RDP_PASS"
+          echo ""
+          echo "Once connected:"
+          echo "   • Open Terminal → Run: waydroid show-full-ui"
+          echo "   • Or use the desktop shortcut (if created)"
+          echo "=================================================="
+
+          # Keep workflow alive
+          while true; do
+              echo "[$(date)] Waydroid RDP Active | Cancel workflow to stop"
+              sleep 300
+          done
