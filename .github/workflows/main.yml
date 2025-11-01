@@ -16,7 +16,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt upgrade -y
-          sudo apt install -y curl wget gnupg lsb-release software-properties-common netcat-openbsd
+          sudo apt install -y curl wget gnupg lsb-release software-properties-common netcat-openbsd ca-certificates
 
       # -------------------------------------------------
       # 2. Install lightweight Xfce + XRDP
@@ -35,21 +35,17 @@ jobs:
           sudo ufw --force enable || true
 
       # -------------------------------------------------
-      # 3. Install Waydroid from OFFICIAL REPO (no PPA)
+      # 3. Install Waydroid via OFFICIAL SCRIPT (fixes repo error)
       # -------------------------------------------------
-      - name: Install Waydroid from repo
+      - name: Install Waydroid from official script
         run: |
-          # Set DISTRO for Ubuntu 24.04 (noble)
-          export DISTRO="ubuntu-noble"
+          # Run the official setup script (auto-detects Ubuntu 24.04/noble)
+          curl https://repo.waydro.id | sudo bash
           
-          # Download GPG key
-          sudo curl https://repo.waydro.id/waydroid.gpg --output /usr/share/keyrings/waydroid.gpg
+          # If auto-detection fails (rare), fallback with manual distro flag
+          # curl https://repo.waydro.id | sudo bash -s noble
           
-          # Add repo to sources.list.d
-          echo "deb [signed-by=/usr/share/keyrings/waydroid.gpg] https://repo.waydro.id/ $DISTRO main" | \
-            sudo tee /etc/apt/sources.list.d/waydroid.list
-          
-          # Update & install
+          # Update & install Waydroid + kernel extras
           sudo apt update
           sudo apt install -y waydroid linux-modules-extra-$(uname -r)
 
