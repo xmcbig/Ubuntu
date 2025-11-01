@@ -16,7 +16,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt upgrade -y
-          sudo apt install -y curl wget gnupg lsb-release software-properties-common netcat-openbsd ca-certificates
+          sudo apt install -y curl wget gnupg lsb-release software-properties-common netcat-openbsd ca-certificates dkms
 
       # -------------------------------------------------
       # 2. Install lightweight Xfce + XRDP
@@ -35,23 +35,30 @@ jobs:
           sudo ufw --force enable || true
 
       # -------------------------------------------------
-      # 3. Install Waydroid via OFFICIAL SCRIPT (fixes repo error)
+      # 3. Install Waydroid via official script + DKMS modules (fixes ashmem error)
       # -------------------------------------------------
-      - name: Install Waydroid from official script
+      - name: Install Waydroid + kernel modules
         run: |
-          # Run the official setup script (auto-detects Ubuntu 24.04/noble)
+          # Official Waydroid setup (auto-detects Ubuntu 24.04)
           curl https://repo.waydro.id | sudo bash
           
-          # If auto-detection fails (rare), fallback with manual distro flag
-          # curl https://repo.waydro.id | sudo bash -s noble
-          
-          # Update & install Waydroid + kernel extras
+          # Install DKMS modules for ashmem/binder (compiles for Azure kernel 6.11+)
           sudo apt update
-          sudo apt install -y waydroid linux-modules-extra-$(uname -r)
+          sudo apt install -y anbox-modules-dkms waydroid linux-modules-extra-$(uname -r)
 
-          # Load kernel modules
-          sudo modprobe binder_linux
-          sudo modprobe ashmem_linux
+          # Wait for DKMS to build/load (may take 30-60s)
+          sleep 60
+          sudo dkms status
+
+          # Load modules (ignore ashmem failure if using memfd)
+          sudo modprobe binder_linux || echo "Binder load skipped (using binderfs)"
+          sudo modprobe ashmem_linux 2>/dev/null || echo "Ashmem load failed (using memfd - expected on kernel 6.11+)"
+
+          # Verify memfd support (required for new kernels)
+          if [ ! -d /dev/memfd ]; then
+              echo "memfd not available - Waydroid may fail"
+              exit 1
+          fi
           echo "binder_linux" | sudo tee -a /etc/modules-load.d/waydroid.conf
           echo "ashmem_linux" | sudo tee -a /etc/modules-load.d/waydroid.conf
 
@@ -79,11 +86,12 @@ jobs:
           echo "RDP_PASS=$password" >> $GITHUB_ENV
 
       # -------------------------------------------------
-      # 5. Initialise Waydroid
+      # 5. Initialise Waydroid (MAINLINE vendor for new kernels)
       # -------------------------------------------------
       - name: Initialise Waydroid
         run: |
-          sudo waydroid init -f
+          # Use MAINLINE vendor (skips ashmem, uses memfd/binderfs)
+          sudo waydroid init -f -s MAINLINE
           sudo systemctl restart waydroid-container
           sleep 10
           sudo waydroid session start &
@@ -98,6 +106,9 @@ jobs:
               timeout=$((timeout - 5))
           done
           [ $timeout -le 0 ] && { echo "Waydroid did not start"; exit 1; }
+
+          # Verify config uses MAINLINE
+          grep "vendor_type = MAINLINE" /var/lib/waydroid/waydroid.cfg || echo "Warning: Not using MAINLINE vendor"
 
       # -------------------------------------------------
       # 6. Tailscale
@@ -138,6 +149,7 @@ jobs:
           echo "Username: $RDP_USER"
           echo "Password: $RDP_PASS"
           waydroid status
+          lsmod | grep -E "(binder|ashmem)"
 
           nc -zv localhost 3389 || { echo "RDP port 3389 not open locally"; exit 1; }
           nc -zv $TAILSCALE_IP 3389 || { echo "RDP not reachable over Tailscale"; exit 1; }
