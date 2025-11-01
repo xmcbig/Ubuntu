@@ -26,7 +26,7 @@ jobs:
           sudo apt install -y xfce4 xfce4-goodies xorg xrdp
           sudo adduser xrdp ssl-cert
 
-          # <<< FIXED LINE >>>  write with sudo
+          # Set Xfce session in skeleton
           echo "xfce4-session" | sudo tee /etc/skel/.xsession > /dev/null
 
           sudo systemctl restart xrdp
@@ -35,14 +35,25 @@ jobs:
           sudo ufw --force enable || true
 
       # -------------------------------------------------
-      # 3. Waydroid PPA & packages
+      # 3. Install Waydroid from OFFICIAL REPO (no PPA)
       # -------------------------------------------------
-      - name: Add Waydroid PPA & install
+      - name: Install Waydroid from repo
         run: |
-          sudo add-apt-repository -y ppa:waydroid/ppa
+          # Set DISTRO for Ubuntu 24.04 (noble)
+          export DISTRO="ubuntu-noble"
+          
+          # Download GPG key
+          sudo curl https://repo.waydro.id/waydroid.gpg --output /usr/share/keyrings/waydroid.gpg
+          
+          # Add repo to sources.list.d
+          echo "deb [signed-by=/usr/share/keyrings/waydroid.gpg] https://repo.waydro.id/ $DISTRO main" | \
+            sudo tee /etc/apt/sources.list.d/waydroid.list
+          
+          # Update & install
           sudo apt update
           sudo apt install -y waydroid linux-modules-extra-$(uname -r)
 
+          # Load kernel modules
           sudo modprobe binder_linux
           sudo modprobe ashmem_linux
           echo "binder_linux" | sudo tee -a /etc/modules-load.d/waydroid.conf
@@ -64,7 +75,7 @@ jobs:
           echo "$username:$password" | sudo chpasswd
           sudo usermod -aG sudo $username
 
-          # Copy the skeleton .xsession to the new user
+          # Copy .xsession to user
           sudo cp /etc/skel/.xsession /home/$username/.xsession
           sudo chown $username:$username /home/$username/.xsession
 
